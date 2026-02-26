@@ -1,6 +1,6 @@
 [package]
 name = "locker"
-version = "0.0.1"
+version = "1.0.0"
 license = "EUPL-1.2"
 description = "linting for your flake.lock"
 homepage = "https://github.com/isabelroses/locker"
@@ -8,6 +8,6 @@ authors = ["isabel roses"]
 edition = "2024"
 
 [dependencies]
-argh = "0.1.13"
-serde = { version = "1.0.219", features = ["derive"] }
-serde_json = "1.0.141"
+argh = "0.1.14"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
