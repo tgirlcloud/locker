@@ -22,11 +22,20 @@ struct FlakeLock {
 }
 
 #[derive(Deserialize, Debug)]
-struct Node {
-    locked: Option<Locked>,
+#[serde(untagged)]
+#[allow(dead_code)]
+enum InputRef {
+    Node(String),
+    Path(Vec<String>),
 }
 
-#[derive(Deserialize, Debug, Eq, PartialEq)]
+#[derive(Deserialize, Debug)]
+struct Node {
+    locked: Option<Locked>,
+    inputs: Option<HashMap<String, InputRef>>,
+}
+
+#[derive(Deserialize, Debug, Eq, PartialEq, Clone)]
 #[serde(tag = "type", rename_all = "lowercase")]
 enum Locked {
     // scm
@@ -53,8 +62,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         std::process::exit(1);
     }
 
-    let inputs = parse_inputs(flake_lock);
-    let duplicates = find_duplicates(inputs);
+    let inputs = parse_inputs(&flake_lock);
+    let duplicates = find_duplicates(&flake_lock, inputs);
 
     if duplicates.is_empty() {
         println!("No duplicate inputs found.");
@@ -69,34 +78,82 @@ fn main() -> Result<(), Box<dyn Error>> {
     std::process::exit(1);
 }
 
-fn parse_inputs(flake_lock: FlakeLock) -> HashMap<String, String> {
+fn parse_inputs(flake_lock: &FlakeLock) -> HashMap<String, String> {
     let mut data = HashMap::new();
 
-    for (k, v) in flake_lock.nodes {
-        if v.locked.is_none() {
-            continue;
+    for (k, v) in &flake_lock.nodes {
+        if let Some(locked) = &v.locked {
+            let val = flake_uri(locked.clone());
+            data.insert(k.clone(), val);
         }
-
-        let val = flake_uri(v.locked.unwrap());
-        data.entry(k).insert_entry(val);
     }
 
     data
 }
 
-fn find_duplicates(inputs: HashMap<String, String>) -> HashMap<String, Vec<String>> {
-    let mut seen: Vec<String> = Vec::new();
-    let mut duplicates: HashMap<String, Vec<String>> = HashMap::new();
+fn find_paths_to_nodes(flake_lock: &FlakeLock) -> HashMap<String, Vec<String>> {
+    let mut node_paths: HashMap<String, Vec<String>> = HashMap::new();
+    let mut visited = std::collections::HashSet::new();
 
-    for (input_name, input_uri) in inputs {
-        if seen.contains(&input_uri) {
-            duplicates.entry(input_uri).or_default().push(input_name);
-        } else {
-            seen.push(input_uri);
+    let mut queue = std::collections::VecDeque::new();
+    queue.push_back((flake_lock.root.clone(), String::new()));
+
+    while let Some((node_id, current_path)) = queue.pop_front() {
+        if !current_path.is_empty() {
+            node_paths
+                .entry(node_id.clone())
+                .or_default()
+                .push(current_path.clone());
+        }
+
+        if visited.contains(&node_id) {
+            continue;
+        }
+        visited.insert(node_id.clone());
+
+        if let Some(node) = flake_lock.nodes.get(&node_id) {
+            if let Some(inputs) = &node.inputs {
+                let mut sorted_inputs: Vec<_> = inputs.iter().collect();
+                sorted_inputs.sort_by_key(|k| k.0);
+
+                for (input_name, input_ref) in sorted_inputs {
+                    if let InputRef::Node(target_id) = input_ref {
+                        let next_path = if current_path.is_empty() {
+                            format!("inputs.{}", input_name)
+                        } else {
+                            format!("{}.inputs.{}", current_path, input_name)
+                        };
+                        queue.push_back((target_id.clone(), next_path));
+                    }
+                }
+            }
         }
     }
 
-    duplicates
+    node_paths
+}
+
+fn find_duplicates(
+    flake_lock: &FlakeLock,
+    inputs: HashMap<String, String>,
+) -> HashMap<String, Vec<String>> {
+    let mut counts: HashMap<String, Vec<String>> = HashMap::new();
+    let paths = find_paths_to_nodes(flake_lock);
+
+    for (node_id, input_uri) in inputs {
+        if let Some(node_paths) = paths.get(&node_id) {
+            for path in node_paths {
+                counts
+                    .entry(input_uri.clone())
+                    .or_default()
+                    .push(format!("{} ({})", node_id, path));
+            }
+        } else if node_id != flake_lock.root {
+            counts.entry(input_uri).or_default().push(node_id);
+        }
+    }
+
+    counts.into_iter().filter(|(_, v)| v.len() > 1).collect()
 }
 
 fn flake_uri(lock: Locked) -> String {
@@ -172,7 +229,7 @@ mod tests {
     #[test]
     fn test_parse_inputs() {
         let flake_lock: FlakeLock = serde_json::from_str(FLAKE_LOCK).unwrap();
-        let inputs = parse_inputs(flake_lock);
+        let inputs = parse_inputs(&flake_lock);
 
         assert_eq!(inputs.len(), 5);
         assert!(inputs.contains_key("input1"));
@@ -198,8 +255,8 @@ mod tests {
     fn test_duplicates() {
         let flake_lock: FlakeLock = serde_json::from_str(FLAKE_LOCK).unwrap();
 
-        let inputs = parse_inputs(flake_lock);
-        let duplicates = find_duplicates(inputs.clone());
+        let inputs = parse_inputs(&flake_lock);
+        let duplicates = find_duplicates(&flake_lock, inputs.clone());
 
         assert_eq!(duplicates.len(), 2);
     }
@@ -209,19 +266,19 @@ mod tests {
         let flake_lock_contents = fs::read_to_string("test/flake-lock.json")?;
         let flake_lock: FlakeLock = serde_json::from_str(&flake_lock_contents)?;
 
-        let inputs = parse_inputs(flake_lock);
-        let duplicates = find_duplicates(inputs);
+        let inputs = parse_inputs(&flake_lock);
+        let duplicates = find_duplicates(&flake_lock, inputs);
 
         assert_eq!(duplicates.len(), 13);
         assert!(duplicates.contains_key("github:nixos/nixpkgs"));
-        assert_eq!(duplicates.get("github:nixos/nixpkgs").unwrap().len(), 6);
+        assert_eq!(duplicates.get("github:nixos/nixpkgs").unwrap().len(), 7);
 
         assert_eq!(
             duplicates
                 .get("tarball:https://api.flakehub.com/f/pinned/edolstra/flake-compat/1.0.1/018afb31-abd1-7bff-a5e4-cff7e18efb7a/source.tar.gz")
                 .unwrap()
                 .len(),
-            1
+            2
         );
 
         Ok(())
