@@ -141,11 +141,9 @@ fn find_duplicates(
 
     for (node_id, input_uri) in inputs {
         if let Some(node_paths) = paths.get(&node_id) {
+            let entry = counts.entry(input_uri).or_default();
             for path in node_paths {
-                counts
-                    .entry(input_uri.clone())
-                    .or_default()
-                    .push(format!("{} ({})", node_id, path));
+                entry.push(format!("{} ({})", node_id, path));
             }
         } else if node_id != flake_lock.root {
             counts.entry(input_uri).or_default().push(node_id);
