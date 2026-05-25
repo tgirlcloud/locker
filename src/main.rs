@@ -113,20 +113,18 @@ fn find_paths_to_nodes(flake_lock: &FlakeLock) -> HashMap<String, Vec<String>> {
         }
         visited.insert(node_id.clone());
 
-        if let Some(node) = flake_lock.nodes.get(&node_id) {
-            if let Some(inputs) = &node.inputs {
-                let mut sorted_inputs: Vec<_> = inputs.iter().collect();
-                sorted_inputs.sort_by_key(|k| k.0);
+        if let Some(node) = flake_lock.nodes.get(&node_id) && let Some(inputs) = &node.inputs {
+            let mut sorted_inputs: Vec<_> = inputs.iter().collect();
+            sorted_inputs.sort_by_key(|k| k.0);
 
-                for (input_name, input_ref) in sorted_inputs {
-                    if let InputRef::Node(target_id) = input_ref {
-                        let next_path = if current_path.is_empty() {
-                            format!("inputs.{}", input_name)
-                        } else {
-                            format!("{}.inputs.{}", current_path, input_name)
-                        };
-                        queue.push_back((target_id.clone(), next_path));
-                    }
+            for (input_name, input_ref) in sorted_inputs {
+                if let InputRef::Node(target_id) = input_ref {
+                    let next_path = if current_path.is_empty() {
+                        format!("inputs.{}", input_name)
+                    } else {
+                        format!("{}.inputs.{}", current_path, input_name)
+                    };
+                    queue.push_back((target_id.clone(), next_path));
                 }
             }
         }
