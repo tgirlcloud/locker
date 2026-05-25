@@ -36,7 +36,7 @@ struct Node {
 }
 
 /// https://nix.dev/manual/nix/2.34/command-ref/new-cli/nix3-flake.html#types
-#[derive(Deserialize, Debug, Eq, PartialEq, Clone)]
+#[derive(Deserialize, Debug)]
 #[serde(tag = "type", rename_all = "lowercase")]
 enum Locked {
     // scm
@@ -85,8 +85,7 @@ fn parse_inputs(flake_lock: &FlakeLock) -> HashMap<String, String> {
 
     for (k, v) in &flake_lock.nodes {
         if let Some(locked) = &v.locked {
-            let val = flake_uri(locked.clone());
-            data.insert(k.clone(), val);
+            data.insert(k.clone(), flake_uri(locked));
         }
     }
 
@@ -156,15 +155,15 @@ fn find_duplicates(
     counts.into_iter().filter(|(_, v)| v.len() > 1).collect()
 }
 
-fn flake_uri(lock: Locked) -> String {
+fn flake_uri(lock: &Locked) -> String {
     match lock {
-        Locked::GitHub { owner, repo } => make_scm_uri("github", &owner, &repo),
-        Locked::GitLab { owner, repo } => make_scm_uri("gitlab", &owner, &repo),
-        Locked::SourceHut { owner, repo } => make_scm_uri("sourcehut", &owner, &repo),
-        Locked::Git { url } => make_url_uri("git", &url),
-        Locked::Hg { url } => make_url_uri("hg", &url),
-        Locked::Tarball { url } => make_url_uri("tarball", &url),
-        Locked::File { url} => make_url_uri("file", &url),
+        Locked::GitHub { owner, repo } => make_scm_uri("github", owner, repo),
+        Locked::GitLab { owner, repo } => make_scm_uri("gitlab", owner, repo),
+        Locked::SourceHut { owner, repo } => make_scm_uri("sourcehut", owner, repo),
+        Locked::Git { url } => make_url_uri("git", url),
+        Locked::Hg { url } => make_url_uri("hg", url),
+        Locked::Tarball { url } => make_url_uri("tarball", url),
+        Locked::File { url } => make_url_uri("file", url),
         Locked::Path { path } => format!("path:{path}"),
     }
 }
@@ -288,21 +287,21 @@ mod tests {
     #[test]
     fn test_flake_uri_scm_variants() {
         assert_eq!(
-            flake_uri(Locked::GitHub {
+            flake_uri(&Locked::GitHub {
                 owner: "nixos".into(),
                 repo: "nixpkgs".into(),
             }),
             "github:nixos/nixpkgs"
         );
         assert_eq!(
-            flake_uri(Locked::GitLab {
+            flake_uri(&Locked::GitLab {
                 owner: "group".into(),
                 repo: "project".into(),
             }),
             "gitlab:group/project"
         );
         assert_eq!(
-            flake_uri(Locked::SourceHut {
+            flake_uri(&Locked::SourceHut {
                 owner: "~user".into(),
                 repo: "repo".into(),
             }),
@@ -313,25 +312,25 @@ mod tests {
     #[test]
     fn test_flake_uri_url_variants() {
         assert_eq!(
-            flake_uri(Locked::Git {
+            flake_uri(&Locked::Git {
                 url: "https://example.com/repo.git".into(),
             }),
             "git:https://example.com/repo.git"
         );
         assert_eq!(
-            flake_uri(Locked::Hg {
+            flake_uri(&Locked::Hg {
                 url: "https://example.com/repo".into(),
             }),
             "hg:https://example.com/repo"
         );
         assert_eq!(
-            flake_uri(Locked::Tarball {
+            flake_uri(&Locked::Tarball {
                 url: "https://example.com/x.tar.gz".into(),
             }),
             "tarball:https://example.com/x.tar.gz"
         );
         assert_eq!(
-            flake_uri(Locked::File {
+            flake_uri(&Locked::File {
                 url: "https://example.com/file".into(),
             }),
             "file:https://example.com/file"
@@ -341,7 +340,7 @@ mod tests {
     #[test]
     fn test_flake_uri_path_variant() {
         assert_eq!(
-            flake_uri(Locked::Path {
+            flake_uri(&Locked::Path {
                 path: "/some/local/path".into(),
             }),
             "path:/some/local/path"
