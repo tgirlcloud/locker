@@ -167,11 +167,13 @@ fn flake_uri(lock: &Locked) -> String {
 }
 
 fn make_scm_uri(node_type: &str, owner: &str, repo: &str) -> String {
-    format!(
-        "{node_type}:{}/{}",
-        owner.to_lowercase(),
-        repo.to_lowercase()
-    )
+    let mut s = String::with_capacity(node_type.len() + owner.len() + repo.len() + 2);
+    s.push_str(node_type);
+    s.push(':');
+    s.extend(owner.chars().flat_map(char::to_lowercase));
+    s.push('/');
+    s.extend(repo.chars().flat_map(char::to_lowercase));
+    s
 }
 
 fn make_url_uri(node_type: &str, url: &str) -> String {
