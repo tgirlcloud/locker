@@ -35,6 +35,7 @@ struct Node {
     inputs: Option<HashMap<String, InputRef>>,
 }
 
+/// https://nix.dev/manual/nix/2.34/command-ref/new-cli/nix3-flake.html#types
 #[derive(Deserialize, Debug, Eq, PartialEq, Clone)]
 #[serde(tag = "type", rename_all = "lowercase")]
 enum Locked {
@@ -47,6 +48,7 @@ enum Locked {
     Git { url: String },
     Hg { url: String },
     Tarball { url: String },
+    File { url: String },
 
     // path
     Path { path: String },
@@ -164,6 +166,7 @@ fn flake_uri(lock: Locked) -> String {
         Locked::Git { url } => make_url_uri("git", &url),
         Locked::Hg { url } => make_url_uri("hg", &url),
         Locked::Tarball { url } => make_url_uri("tarball", &url),
+        Locked::File { url} => make_url_uri("file", &url),
         Locked::Path { path } => format!("path:{path}"),
     }
 }
