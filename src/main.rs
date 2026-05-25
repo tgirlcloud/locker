@@ -284,4 +284,300 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn test_flake_uri_scm_variants() {
+        assert_eq!(
+            flake_uri(Locked::GitHub {
+                owner: "nixos".into(),
+                repo: "nixpkgs".into(),
+            }),
+            "github:nixos/nixpkgs"
+        );
+        assert_eq!(
+            flake_uri(Locked::GitLab {
+                owner: "group".into(),
+                repo: "project".into(),
+            }),
+            "gitlab:group/project"
+        );
+        assert_eq!(
+            flake_uri(Locked::SourceHut {
+                owner: "~user".into(),
+                repo: "repo".into(),
+            }),
+            "sourcehut:~user/repo"
+        );
+    }
+
+    #[test]
+    fn test_flake_uri_url_variants() {
+        assert_eq!(
+            flake_uri(Locked::Git {
+                url: "https://example.com/repo.git".into(),
+            }),
+            "git:https://example.com/repo.git"
+        );
+        assert_eq!(
+            flake_uri(Locked::Hg {
+                url: "https://example.com/repo".into(),
+            }),
+            "hg:https://example.com/repo"
+        );
+        assert_eq!(
+            flake_uri(Locked::Tarball {
+                url: "https://example.com/x.tar.gz".into(),
+            }),
+            "tarball:https://example.com/x.tar.gz"
+        );
+        assert_eq!(
+            flake_uri(Locked::File {
+                url: "https://example.com/file".into(),
+            }),
+            "file:https://example.com/file"
+        );
+    }
+
+    #[test]
+    fn test_flake_uri_path_variant() {
+        assert_eq!(
+            flake_uri(Locked::Path {
+                path: "/some/local/path".into(),
+            }),
+            "path:/some/local/path"
+        );
+    }
+
+    #[test]
+    fn test_make_scm_uri_lowercases_owner_and_repo() {
+        assert_eq!(
+            make_scm_uri("github", "NixOS", "Nixpkgs"),
+            "github:nixos/nixpkgs"
+        );
+        assert_eq!(
+            make_scm_uri("gitlab", "MIXED-Case", "PROJECT"),
+            "gitlab:mixed-case/project"
+        );
+    }
+
+    #[test]
+    fn test_scm_uri_case_insensitive_collision() {
+        // Two nodes pointing at the same repo with different casing should
+        // collapse to a single uri (and thus be detected as duplicates).
+        let lock = r#"
+        {
+            "nodes": {
+                "a": {
+                    "locked": {
+                        "type": "github",
+                        "owner": "NixOS",
+                        "repo": "Nixpkgs"
+                    }
+                },
+                "b": {
+                    "locked": {
+                        "type": "github",
+                        "owner": "nixos",
+                        "repo": "nixpkgs"
+                    }
+                },
+                "root": {
+                    "inputs": {
+                        "a": "a",
+                        "b": "b"
+                    }
+                }
+            },
+            "version": 7,
+            "root": "root"
+        }
+        "#;
+
+        let flake_lock: FlakeLock = serde_json::from_str(lock).unwrap();
+        let inputs = parse_inputs(&flake_lock);
+        let duplicates = find_duplicates(&flake_lock, inputs);
+
+        assert_eq!(duplicates.len(), 1);
+        assert!(duplicates.contains_key("github:nixos/nixpkgs"));
+        assert_eq!(duplicates.get("github:nixos/nixpkgs").unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_no_duplicates() {
+        let lock = r#"
+        {
+            "nodes": {
+                "a": {
+                    "locked": {
+                        "type": "github",
+                        "owner": "u",
+                        "repo": "one"
+                    }
+                },
+                "b": {
+                    "locked": {
+                        "type": "github",
+                        "owner": "u",
+                        "repo": "two"
+                    }
+                },
+                "root": {
+                    "inputs": {
+                        "a": "a",
+                        "b": "b"
+                    }
+                }
+            },
+            "version": 7,
+            "root": "root"
+        }
+        "#;
+
+        let flake_lock: FlakeLock = serde_json::from_str(lock).unwrap();
+        let inputs = parse_inputs(&flake_lock);
+        let duplicates = find_duplicates(&flake_lock, inputs);
+
+        assert!(duplicates.is_empty());
+    }
+
+    #[test]
+    fn test_find_paths_to_nodes_nested() {
+        let lock = r#"
+        {
+            "nodes": {
+                "child": {
+                    "locked": {
+                        "type": "github",
+                        "owner": "u",
+                        "repo": "child"
+                    }
+                },
+                "parent": {
+                    "inputs": {
+                        "child": "child"
+                    },
+                    "locked": {
+                        "type": "github",
+                        "owner": "u",
+                        "repo": "parent"
+                    }
+                },
+                "root": {
+                    "inputs": {
+                        "parent": "parent",
+                        "child": "child"
+                    }
+                }
+            },
+            "version": 7,
+            "root": "root"
+        }
+        "#;
+
+        let flake_lock: FlakeLock = serde_json::from_str(lock).unwrap();
+        let paths = find_paths_to_nodes(&flake_lock);
+
+        let parent_paths = paths.get("parent").expect("parent should have a path");
+        assert_eq!(parent_paths, &vec!["inputs.parent".to_string()]);
+
+        let mut child_paths = paths.get("child").expect("child should have paths").clone();
+        child_paths.sort();
+        assert_eq!(
+            child_paths,
+            vec![
+                "inputs.child".to_string(),
+                "inputs.parent.inputs.child".to_string(),
+            ]
+        );
+
+        // The root node itself should not appear in the path map.
+        assert!(!paths.contains_key("root"));
+    }
+
+    #[test]
+    fn test_duplicates_include_dependency_paths() {
+        // `child` is reached both directly from root and via `parent`, so the
+        // duplicate report should mention both paths.
+        let lock = r#"
+        {
+            "nodes": {
+                "child": {
+                    "locked": {
+                        "type": "github",
+                        "owner": "u",
+                        "repo": "child"
+                    }
+                },
+                "parent": {
+                    "inputs": {
+                        "child": "child"
+                    },
+                    "locked": {
+                        "type": "github",
+                        "owner": "u",
+                        "repo": "parent"
+                    }
+                },
+                "root": {
+                    "inputs": {
+                        "parent": "parent",
+                        "child": "child"
+                    }
+                }
+            },
+            "version": 7,
+            "root": "root"
+        }
+        "#;
+
+        let flake_lock: FlakeLock = serde_json::from_str(lock).unwrap();
+        let inputs = parse_inputs(&flake_lock);
+        let duplicates = find_duplicates(&flake_lock, inputs);
+
+        let mut entries = duplicates
+            .get("github:u/child")
+            .expect("child should be reported as a duplicate")
+            .clone();
+        entries.sort();
+        assert_eq!(
+            entries,
+            vec![
+                "child (inputs.child)".to_string(),
+                "child (inputs.parent.inputs.child)".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_inputs_ignores_nodes_without_locked() {
+        // The root node has no `locked` field and must be excluded from the
+        // parsed inputs map.
+        let lock = r#"
+        {
+            "nodes": {
+                "a": {
+                    "locked": {
+                        "type": "github",
+                        "owner": "u",
+                        "repo": "r"
+                    }
+                },
+                "root": {
+                    "inputs": {
+                        "a": "a"
+                    }
+                }
+            },
+            "version": 7,
+            "root": "root"
+        }
+        "#;
+
+        let flake_lock: FlakeLock = serde_json::from_str(lock).unwrap();
+        let inputs = parse_inputs(&flake_lock);
+
+        assert_eq!(inputs.len(), 1);
+        assert!(inputs.contains_key("a"));
+        assert!(!inputs.contains_key("root"));
+    }
 }
