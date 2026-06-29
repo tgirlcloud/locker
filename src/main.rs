@@ -17,6 +17,11 @@ struct Args {
     /// input name to ignore when checking for duplicates (may be repeated)
     #[argh(option, short = 'i')]
     ignore: Vec<String>,
+
+    /// treat inputs that track different branches (refs) as distinct rather
+    /// than duplicates (off by default)
+    #[argh(switch, short = 'b')]
+    distinct_branches: bool,
 }
 
 #[derive(Deserialize, Debug)]
@@ -40,6 +45,15 @@ enum InputRef {
 struct Node {
     locked: Option<Locked>,
     inputs: Option<HashMap<String, InputRef>>,
+    original: Option<Original>,
+}
+
+/// The `original` flake reference, before locking. The branch a user tracks
+/// lives here (e.g. `nixos-unstable`), not in `locked`.
+#[derive(Deserialize, Debug)]
+struct Original {
+    #[serde(rename = "ref")]
+    git_ref: Option<String>,
 }
 
 /// https://nix.dev/manual/nix/2.34/command-ref/new-cli/nix3-flake.html#types
@@ -72,7 +86,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let ignore: HashSet<String> = args.ignore.into_iter().collect();
-    let inputs = parse_inputs(&flake_lock);
+    let inputs = parse_inputs(&flake_lock, args.distinct_branches);
     let duplicates = find_duplicates(&flake_lock, inputs, &ignore);
 
     if duplicates.is_empty() {
@@ -88,12 +102,19 @@ fn main() -> Result<(), Box<dyn Error>> {
     std::process::exit(1);
 }
 
-fn parse_inputs(flake_lock: &FlakeLock) -> HashMap<String, String> {
+fn parse_inputs(flake_lock: &FlakeLock, distinct_branches: bool) -> HashMap<String, String> {
     let mut data = HashMap::new();
 
     for (k, v) in &flake_lock.nodes {
         if let Some(locked) = &v.locked {
-            data.insert(k.clone(), flake_uri(locked));
+            let mut uri = flake_uri(locked);
+            if distinct_branches
+                && let Some(git_ref) = v.original.as_ref().and_then(|o| o.git_ref.as_deref())
+            {
+                uri.push('/');
+                uri.push_str(git_ref);
+            }
+            data.insert(k.clone(), uri);
         }
     }
 
@@ -242,7 +263,7 @@ mod tests {
     #[test]
     fn test_parse_inputs() {
         let flake_lock: FlakeLock = serde_json::from_str(FLAKE_LOCK).unwrap();
-        let inputs = parse_inputs(&flake_lock);
+        let inputs = parse_inputs(&flake_lock, false);
 
         assert_eq!(inputs.len(), 5);
         assert!(inputs.contains_key("input1"));
@@ -268,7 +289,7 @@ mod tests {
     fn test_duplicates() {
         let flake_lock: FlakeLock = serde_json::from_str(FLAKE_LOCK).unwrap();
 
-        let inputs = parse_inputs(&flake_lock);
+        let inputs = parse_inputs(&flake_lock, false);
         let duplicates = find_duplicates(&flake_lock, inputs.clone(), &HashSet::new());
 
         assert_eq!(duplicates.len(), 2);
@@ -277,7 +298,7 @@ mod tests {
     #[test]
     fn test_ignore_excludes_named_inputs() {
         let flake_lock: FlakeLock = serde_json::from_str(FLAKE_LOCK).unwrap();
-        let inputs = parse_inputs(&flake_lock);
+        let inputs = parse_inputs(&flake_lock, false);
 
         // input1 and input3 both resolve to github:user1/repo1. Ignoring
         // input3 leaves a single occurrence, so it is no longer a duplicate.
@@ -289,12 +310,98 @@ mod tests {
         assert!(duplicates.contains_key("git:https://example.com/repo.git"));
     }
 
+    // Two inputs tracking the same repo on different branches.
+    const BRANCHED_LOCK: &str = r#"
+    {
+        "nodes": {
+            "nixpkgs-unstable": {
+                "locked": { "type": "github", "owner": "nixos", "repo": "nixpkgs", "rev": "aaa" },
+                "original": { "type": "github", "owner": "nixos", "repo": "nixpkgs", "ref": "nixos-unstable" }
+            },
+            "nixpkgs-stable": {
+                "locked": { "type": "github", "owner": "nixos", "repo": "nixpkgs", "rev": "bbb" },
+                "original": { "type": "github", "owner": "nixos", "repo": "nixpkgs", "ref": "nixos-24.05" }
+            },
+            "root": {
+                "inputs": {
+                    "nixpkgs-unstable": "nixpkgs-unstable",
+                    "nixpkgs-stable": "nixpkgs-stable"
+                }
+            }
+        },
+        "version": 7,
+        "root": "root"
+    }
+    "#;
+
+    #[test]
+    fn test_branches_collapsed_by_default() {
+        // Without --distinct-branches, differing branches share a uri and are
+        // reported as a duplicate.
+        let flake_lock: FlakeLock = serde_json::from_str(BRANCHED_LOCK).unwrap();
+        let inputs = parse_inputs(&flake_lock, false);
+        let duplicates = find_duplicates(&flake_lock, inputs, &HashSet::new());
+
+        assert_eq!(duplicates.len(), 1);
+        assert!(duplicates.contains_key("github:nixos/nixpkgs"));
+    }
+
+    #[test]
+    fn test_distinct_branches_separates_refs() {
+        // With distinct_branches, the ref is folded into the uri so the two
+        // nixpkgs inputs are no longer duplicates.
+        let flake_lock: FlakeLock = serde_json::from_str(BRANCHED_LOCK).unwrap();
+        let inputs = parse_inputs(&flake_lock, true);
+
+        assert_eq!(
+            inputs.get("nixpkgs-unstable").unwrap(),
+            "github:nixos/nixpkgs/nixos-unstable"
+        );
+        assert_eq!(
+            inputs.get("nixpkgs-stable").unwrap(),
+            "github:nixos/nixpkgs/nixos-24.05"
+        );
+
+        let duplicates = find_duplicates(&flake_lock, inputs, &HashSet::new());
+        assert!(duplicates.is_empty());
+    }
+
+    #[test]
+    fn test_distinct_branches_keeps_same_branch_duplicates() {
+        // Same repo, same (absent) branch: still a duplicate even with the
+        // flag on, because nothing distinguishes them.
+        let lock = r#"
+        {
+            "nodes": {
+                "a": {
+                    "locked": { "type": "github", "owner": "nixos", "repo": "nixpkgs" },
+                    "original": { "type": "github", "owner": "nixos", "repo": "nixpkgs" }
+                },
+                "b": {
+                    "locked": { "type": "github", "owner": "nixos", "repo": "nixpkgs" },
+                    "original": { "type": "github", "owner": "nixos", "repo": "nixpkgs" }
+                },
+                "root": { "inputs": { "a": "a", "b": "b" } }
+            },
+            "version": 7,
+            "root": "root"
+        }
+        "#;
+
+        let flake_lock: FlakeLock = serde_json::from_str(lock).unwrap();
+        let inputs = parse_inputs(&flake_lock, true);
+        let duplicates = find_duplicates(&flake_lock, inputs, &HashSet::new());
+
+        assert_eq!(duplicates.len(), 1);
+        assert!(duplicates.contains_key("github:nixos/nixpkgs"));
+    }
+
     #[test]
     fn test_duplicates_2() -> Result<(), Box<dyn Error>> {
         let flake_lock_contents = fs::read_to_string("test/flake-lock.json")?;
         let flake_lock: FlakeLock = serde_json::from_str(&flake_lock_contents)?;
 
-        let inputs = parse_inputs(&flake_lock);
+        let inputs = parse_inputs(&flake_lock, false);
         let duplicates = find_duplicates(&flake_lock, inputs, &HashSet::new());
 
         assert_eq!(duplicates.len(), 13);
@@ -421,7 +528,7 @@ mod tests {
         "#;
 
         let flake_lock: FlakeLock = serde_json::from_str(lock).unwrap();
-        let inputs = parse_inputs(&flake_lock);
+        let inputs = parse_inputs(&flake_lock, false);
         let duplicates = find_duplicates(&flake_lock, inputs, &HashSet::new());
 
         assert_eq!(duplicates.len(), 1);
@@ -461,7 +568,7 @@ mod tests {
         "#;
 
         let flake_lock: FlakeLock = serde_json::from_str(lock).unwrap();
-        let inputs = parse_inputs(&flake_lock);
+        let inputs = parse_inputs(&flake_lock, false);
         let duplicates = find_duplicates(&flake_lock, inputs, &HashSet::new());
 
         assert!(duplicates.is_empty());
@@ -558,7 +665,7 @@ mod tests {
         "#;
 
         let flake_lock: FlakeLock = serde_json::from_str(lock).unwrap();
-        let inputs = parse_inputs(&flake_lock);
+        let inputs = parse_inputs(&flake_lock, false);
         let duplicates = find_duplicates(&flake_lock, inputs, &HashSet::new());
 
         let mut entries = duplicates
@@ -601,7 +708,7 @@ mod tests {
         "#;
 
         let flake_lock: FlakeLock = serde_json::from_str(lock).unwrap();
-        let inputs = parse_inputs(&flake_lock);
+        let inputs = parse_inputs(&flake_lock, false);
 
         assert_eq!(inputs.len(), 1);
         assert!(inputs.contains_key("a"));
