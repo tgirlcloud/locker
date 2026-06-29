@@ -2,17 +2,20 @@ use argh::FromArgs;
 use serde::Deserialize;
 use std::error::Error;
 use std::fs;
+use std::process::ExitCode;
 use std::{
     collections::{HashMap, HashSet},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 /// locker - a tool to lint your flake.lock file
 #[derive(FromArgs)]
 #[argh(help_triggers("-h", "--help"))]
 struct Args {
-    #[argh(positional, default = "PathBuf::from(\"flake.lock\")")]
-    flake_lock: PathBuf,
+    /// one or more flake.lock files to check (defaults to ./flake.lock).
+    /// treefmt passes matched paths here as positional arguments.
+    #[argh(positional)]
+    flake_lock: Vec<PathBuf>,
 
     /// input name to ignore when checking for duplicates (may be repeated)
     #[argh(option, short = 'i')]
@@ -75,31 +78,56 @@ enum Locked {
     Path { path: String },
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
-    let args: Args = argh::from_env();
-    let flake_lock_content = fs::read_to_string(&args.flake_lock)?;
-    let flake_lock: FlakeLock = serde_json::from_str(&flake_lock_content)?;
+fn check_file(
+    path: &Path,
+    ignore: &HashSet<String>,
+    distinct_branches: bool,
+) -> Result<HashMap<String, Vec<String>>, Box<dyn Error>> {
+    let content = fs::read_to_string(path)?;
+    let flake_lock: FlakeLock = serde_json::from_str(&content)?;
 
     if flake_lock.version != 7 {
-        eprintln!("Unsupported flake.lock version: {}", flake_lock.version);
-        std::process::exit(1);
+        return Err(format!("unsupported flake.lock version: {}", flake_lock.version).into());
     }
 
+    let inputs = parse_inputs(&flake_lock, distinct_branches);
+    Ok(find_duplicates(&flake_lock, inputs, ignore))
+}
+
+fn main() -> ExitCode {
+    let args: Args = argh::from_env();
     let ignore: HashSet<String> = args.ignore.into_iter().collect();
-    let inputs = parse_inputs(&flake_lock, args.distinct_branches);
-    let duplicates = find_duplicates(&flake_lock, inputs, &ignore);
+    let files = resolve_files(args.flake_lock);
 
-    if duplicates.is_empty() {
+    let mut failed = false;
+
+    for path in &files {
+        match check_file(path, &ignore, args.distinct_branches) {
+            Ok(duplicates) if duplicates.is_empty() => {}
+            Ok(duplicates) => {
+                failed = true;
+                eprintln!("{}: duplicate inputs found:", path.display());
+
+                let mut sorted: Vec<_> = duplicates.into_iter().collect();
+                sorted.sort_by(|a, b| a.0.cmp(&b.0));
+                for (uri, mut dups) in sorted {
+                    dups.sort();
+                    eprintln!("  '{}': {}", uri, dups.join(", "));
+                }
+            }
+            Err(e) => {
+                failed = true;
+                eprintln!("{}: {}", path.display(), e);
+            }
+        }
+    }
+
+    if failed {
+        ExitCode::FAILURE
+    } else {
         println!("No duplicate inputs found.");
-        std::process::exit(0);
+        ExitCode::SUCCESS
     }
-
-    println!("The following flake uris contained duplicate entries in your flake.lock:");
-    for (input, dups) in duplicates {
-        eprintln!("  '{}': {}", input, dups.join(", "));
-    }
-
-    std::process::exit(1);
 }
 
 fn parse_inputs(flake_lock: &FlakeLock, distinct_branches: bool) -> HashMap<String, String> {
@@ -212,6 +240,14 @@ fn make_scm_uri(node_type: &str, owner: &str, repo: &str) -> String {
 
 fn make_url_uri(node_type: &str, url: &str) -> String {
     format!("{node_type}:{url}")
+}
+
+fn resolve_files(files: Vec<PathBuf>) -> Vec<PathBuf> {
+    if files.is_empty() {
+        vec![PathBuf::from("flake.lock")]
+    } else {
+        files
+    }
 }
 
 #[cfg(test)]
@@ -680,6 +716,41 @@ mod tests {
                 "child (inputs.parent.inputs.child)".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn test_check_file_reports_duplicates() {
+        let dups = check_file(
+            Path::new("test/flake-lock.json"),
+            &HashSet::new(),
+            false,
+        )
+        .expect("fixture should parse");
+        assert_eq!(dups.len(), 13);
+        assert!(dups.contains_key("github:nixos/nixpkgs"));
+    }
+
+    #[test]
+    fn test_check_file_rejects_unsupported_version() {
+        let lock = r#"{ "nodes": {}, "version": 6, "root": "root" }"#;
+        let dir = std::env::temp_dir().join("locker-test-bad-version");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("flake.lock");
+        std::fs::write(&path, lock).unwrap();
+
+        let err = check_file(&path, &HashSet::new(), false).unwrap_err();
+        assert!(err.to_string().contains("version"));
+    }
+
+    #[test]
+    fn test_resolve_files_defaults_to_flake_lock() {
+        assert_eq!(resolve_files(vec![]), vec![PathBuf::from("flake.lock")]);
+    }
+
+    #[test]
+    fn test_resolve_files_passes_through() {
+        let given = vec![PathBuf::from("a/flake.lock"), PathBuf::from("b/flake.lock")];
+        assert_eq!(resolve_files(given.clone()), given);
     }
 
     #[test]

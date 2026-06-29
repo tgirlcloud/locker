@@ -1,0 +1,36 @@
+{
+  "nodes": {
+    "a": {
+      "locked": {
+        "type": "github",
+        "owner": "u",
+        "repo": "one"
+      },
+      "original": {
+        "type": "github",
+        "owner": "u",
+        "repo": "one"
+      }
+    },
+    "b": {
+      "locked": {
+        "type": "github",
+        "owner": "u",
+        "repo": "two"
+      },
+      "original": {
+        "type": "github",
+        "owner": "u",
+        "repo": "two"
+      }
+    },
+    "root": {
+      "inputs": {
+        "a": "a",
+        "b": "b"
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}
