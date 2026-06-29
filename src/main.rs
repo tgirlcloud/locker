@@ -2,7 +2,10 @@ use argh::FromArgs;
 use serde::Deserialize;
 use std::error::Error;
 use std::fs;
-use std::{collections::HashMap, path::PathBuf};
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+};
 
 /// locker - a tool to lint your flake.lock file
 #[derive(FromArgs)]
@@ -10,6 +13,10 @@ use std::{collections::HashMap, path::PathBuf};
 struct Args {
     #[argh(positional, default = "PathBuf::from(\"flake.lock\")")]
     flake_lock: PathBuf,
+
+    /// input name to ignore when checking for duplicates (may be repeated)
+    #[argh(option, short = 'i')]
+    ignore: Vec<String>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -64,8 +71,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         std::process::exit(1);
     }
 
+    let ignore: HashSet<String> = args.ignore.into_iter().collect();
     let inputs = parse_inputs(&flake_lock);
-    let duplicates = find_duplicates(&flake_lock, inputs);
+    let duplicates = find_duplicates(&flake_lock, inputs, &ignore);
 
     if duplicates.is_empty() {
         println!("No duplicate inputs found.");
@@ -135,11 +143,16 @@ fn find_paths_to_nodes(flake_lock: &FlakeLock) -> HashMap<String, Vec<String>> {
 fn find_duplicates(
     flake_lock: &FlakeLock,
     inputs: HashMap<String, String>,
+    ignore: &HashSet<String>,
 ) -> HashMap<String, Vec<String>> {
     let mut counts: HashMap<String, Vec<String>> = HashMap::new();
     let paths = find_paths_to_nodes(flake_lock);
 
     for (node_id, input_uri) in inputs {
+        if ignore.contains(&node_id) {
+            continue;
+        }
+
         if let Some(node_paths) = paths.get(&node_id) {
             let entry = counts.entry(input_uri).or_default();
             for path in node_paths {
@@ -256,9 +269,24 @@ mod tests {
         let flake_lock: FlakeLock = serde_json::from_str(FLAKE_LOCK).unwrap();
 
         let inputs = parse_inputs(&flake_lock);
-        let duplicates = find_duplicates(&flake_lock, inputs.clone());
+        let duplicates = find_duplicates(&flake_lock, inputs.clone(), &HashSet::new());
 
         assert_eq!(duplicates.len(), 2);
+    }
+
+    #[test]
+    fn test_ignore_excludes_named_inputs() {
+        let flake_lock: FlakeLock = serde_json::from_str(FLAKE_LOCK).unwrap();
+        let inputs = parse_inputs(&flake_lock);
+
+        // input1 and input3 both resolve to github:user1/repo1. Ignoring
+        // input3 leaves a single occurrence, so it is no longer a duplicate.
+        let ignore: HashSet<String> = ["input3".to_string()].into_iter().collect();
+        let duplicates = find_duplicates(&flake_lock, inputs, &ignore);
+
+        assert_eq!(duplicates.len(), 1);
+        assert!(!duplicates.contains_key("github:user1/repo1"));
+        assert!(duplicates.contains_key("git:https://example.com/repo.git"));
     }
 
     #[test]
@@ -267,7 +295,7 @@ mod tests {
         let flake_lock: FlakeLock = serde_json::from_str(&flake_lock_contents)?;
 
         let inputs = parse_inputs(&flake_lock);
-        let duplicates = find_duplicates(&flake_lock, inputs);
+        let duplicates = find_duplicates(&flake_lock, inputs, &HashSet::new());
 
         assert_eq!(duplicates.len(), 13);
         assert!(duplicates.contains_key("github:nixos/nixpkgs"));
@@ -394,7 +422,7 @@ mod tests {
 
         let flake_lock: FlakeLock = serde_json::from_str(lock).unwrap();
         let inputs = parse_inputs(&flake_lock);
-        let duplicates = find_duplicates(&flake_lock, inputs);
+        let duplicates = find_duplicates(&flake_lock, inputs, &HashSet::new());
 
         assert_eq!(duplicates.len(), 1);
         assert!(duplicates.contains_key("github:nixos/nixpkgs"));
@@ -434,7 +462,7 @@ mod tests {
 
         let flake_lock: FlakeLock = serde_json::from_str(lock).unwrap();
         let inputs = parse_inputs(&flake_lock);
-        let duplicates = find_duplicates(&flake_lock, inputs);
+        let duplicates = find_duplicates(&flake_lock, inputs, &HashSet::new());
 
         assert!(duplicates.is_empty());
     }
@@ -531,7 +559,7 @@ mod tests {
 
         let flake_lock: FlakeLock = serde_json::from_str(lock).unwrap();
         let inputs = parse_inputs(&flake_lock);
-        let duplicates = find_duplicates(&flake_lock, inputs);
+        let duplicates = find_duplicates(&flake_lock, inputs, &HashSet::new());
 
         let mut entries = duplicates
             .get("github:u/child")
